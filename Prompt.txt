@@ -142,7 +142,7 @@ GSAP Timelines for chaining animations
 
 Use:
 
-from(), fromTo(), stagger
+from(), fromTo(),  stagger
 
 blur-to-clear, opacity 0 → 1, y 40 → 0
 
