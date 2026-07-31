@@ -22,6 +22,7 @@ The content covers core product requirements, database design, scheduling, notif
 - [TDD_Scheduling_and_Events_System.md](TDD_Scheduling_and_Events_System.md) — scheduling engine, event model, and calendar-related workflows.
 - [TDD_Room_Management_V1.0.md](TDD_Room_Management_V1.0.md) — room and lab allocation, booking requests, and exam scheduling workflows.
 - [TDD_Notifications_System_v1.1.md](TDD_Notifications_System_v1.1.md) — notifications, announcements, and delivery architecture.
+- [TDD_Chat_System_v1.0.md](TDD_Chat_System_v1.0.md) — chat channels, posts, comments, and support-thread design aligned with the MVP and multi-tenancy rules.
 - [tdd_file_repository_v1.1.md](tdd_file_repository_v1.1.md) — file repository design, upload/download flows, access policies, and review workflows.
 
 ### Use case documents
