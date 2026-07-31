@@ -107,6 +107,7 @@
 |---|---|---|---|
 | **قنوات + رسائل + تعليقات في نفس الجدول ✅** | أبسط، أقل تعقيداً، مناسب للـ MVP | بعض الاستعلامات تحتاج `parent_message_id` | يقبل لأن النظام محدود النطاق |
 | نموذج threads منفصل ❌ | مرونة أكبر للـ threading | زيادة التعقيد لغير داعٍ | رُفض |
+| جدولان منفصلان (`chat_posts` + `chat_comments`) ❌ | عزّل كامل لكل نوع | تكرار سياسات RLS وتضاعف استعلامات القراءة | رُفض لتبسيط المنطق والـ RPCs |
 
 ### [D-03] التزامن المباشر
 
@@ -114,6 +115,7 @@
 |---|---|---|---|
 | **Supabase Realtime ✅** | مناسب لتحديثات القنوات المفتوحة | يحتاج إدارة إعادة الاتصال | يقبل |
 | polling فقط ❌ | بسيط | أعلى استهلاك وبتأخر أعلى | رُفض |
+| خادم WebSockets مخصص ❌ | تحكم كامل في البرتوكول | تعقيد تشغيلي وإدارة خوادم إضافية | رُفض للالتزام ببيئة Supabase |
 
 ## 2.3 — الديون التقنية المقبولة عمداً
 
@@ -207,13 +209,13 @@ erDiagram
     PROFILE ||--o{ CHAT_READ_STATE : tracks
 
     INSTITUTION {
-        bigint id
+        uuid id
         text name
     }
 
     CHAT_CHANNEL {
         uuid id
-        bigint institution_id
+        uuid institution_id
         text channel_type
         bigint course_id
         text title
@@ -222,13 +224,14 @@ erDiagram
 
     PROFILE {
         uuid id
-        bigint institution_id
+        uuid institution_id
     }
 
     CHAT_MESSAGE {
         uuid id
+        uuid institution_id
         uuid channel_id
-        uuid author_profile_id
+        uuid author_id
         uuid parent_message_id
         text body
         text status
@@ -237,6 +240,7 @@ erDiagram
 
     CHAT_READ_STATE {
         uuid id
+        uuid institution_id
         uuid channel_id
         uuid profile_id
         uuid last_read_message_id
@@ -246,12 +250,12 @@ erDiagram
 ## 4.2 — تعريف الجداول
 
 ```sql
--- chat_channels: قناة مادة أو قناة دعم داخل مؤسسة
+-- chat_channels: قناة مادة، قناة دعم، أو قناة إدارية داخل مؤسسة
 CREATE TABLE chat_channels (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    institution_id BIGINT NOT NULL,
-    channel_type TEXT NOT NULL CHECK (channel_type IN ('course','support')),
-    course_id BIGINT NULL,
+    institution_id UUID NOT NULL REFERENCES institutions(id) ON DELETE CASCADE,
+    channel_type TEXT NOT NULL CHECK (channel_type IN ('course','support','admin_lecturer','admin_admin')),
+    course_id BIGINT NULL REFERENCES courses(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     description TEXT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -263,12 +267,12 @@ CREATE TABLE chat_channels (
 -- chat_messages: منشور أو تعليق داخل قناة
 CREATE TABLE chat_messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    institution_id BIGINT NOT NULL,
+    institution_id UUID NOT NULL REFERENCES institutions(id) ON DELETE CASCADE,
     channel_id UUID NOT NULL REFERENCES chat_channels(id) ON DELETE CASCADE,
-    author_profile_id UUID NOT NULL,
+    author_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
     parent_message_id UUID NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
     message_type TEXT NOT NULL CHECK (message_type IN ('post','comment')),
-    body TEXT NOT NULL,
+    body TEXT NOT NULL CHECK (char_length(body) <= 8000),
     status TEXT NOT NULL DEFAULT 'published' CHECK (status IN ('published','deleted','edited')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -278,7 +282,7 @@ CREATE TABLE chat_messages (
 -- chat_message_attachments: المرفقات المرفقة بالرسالة
 CREATE TABLE chat_message_attachments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    institution_id BIGINT NOT NULL,
+    institution_id UUID NOT NULL REFERENCES institutions(id) ON DELETE CASCADE,
     message_id UUID NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
     file_path TEXT NOT NULL,
     file_name TEXT NOT NULL,
@@ -290,9 +294,9 @@ CREATE TABLE chat_message_attachments (
 -- chat_read_state: آخر رسالة مقروءة للمستخدم داخل القناة
 CREATE TABLE chat_read_state (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    institution_id BIGINT NOT NULL,
+    institution_id UUID NOT NULL REFERENCES institutions(id) ON DELETE CASCADE,
     channel_id UUID NOT NULL REFERENCES chat_channels(id) ON DELETE CASCADE,
-    profile_id UUID NOT NULL,
+    profile_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
     last_read_message_id UUID NULL REFERENCES chat_messages(id),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(institution_id, channel_id, profile_id)
@@ -415,8 +419,60 @@ CREATE TABLE chat_read_state (
 - [x] تشفير البيانات: TLS في النقل + Encryption at rest في Supabase
 - [x] إدارة الأسرار: لا توجد مفاتيح داخل الكود؛ كل شيء في Secrets Manager / Supabase env
 
+## 6.5 — الملاحظة والمراقبة (Observability)
+
+| المقياس (Metric) | عتبة التنبيه (Alert Threshold) | الإجراء المتخذ |
+|---|---|---|
+| زمن استجابة `create_course_post` | > 1.5s | تنبيه فوري لفحص أداء فهارس قاعدة البيانات |
+| معدل استهلاك قنوات Realtime | > 80% من حصة Supabase | تنبيه لتصفية الاشتراكات غير النشطة |
+| معدل أخطاء RLS 403 Forbidden | > 50 طلب / دقيقة | فحص محاولات الوصول غير المصرح بها |
+| فشل رفع مرفقات الدردشة | > 5% | فحص حصة التخزين والشبكة |
+
+---
+
+# القسم 7: خطة التنفيذ وخارطة الطريق 🗺️
+
+## 7.1 — ترتيب المخاطر (Risk-First Ordering)
+
+أخطر افتراض تقني في هذا النظام هو **أداء Supabase Realtime وقواعد RLS تحت ضغط 10 مؤسسات نَشِطة بالتزامن**. لذلك يتم بناء Spike اختبار الأداء والبث المباشر في المرحلة 0 قبل أي تطوير واجهات.
+
+## 7.2 — المراحل
+
+### المرحلة 0: إثبات الجدوى (Spike) — 3 أيام
+- **الهدف:** التحقق من RLS والبث المباشر لقنوات المادة تحت حمل متزامن (1,000 مستخدم نشط).
+- **المخرج القابل للاختبار:** سكريبت K6 / Supabase RPC test يمرر 1,000 محاكاة قراءة وبث.
+- **معيار النجاح:** p95 latency < 1.5s بدون أي تسريب للبيانات بين المؤسسات.
+
+### المرحلة 1: طبقة البيانات والـ RPCs الأساسية — 5 أيام
+- **المهام:**
+  1. تطبيق Migration للجداول (`chat_channels`, `chat_messages`, `chat_message_attachments`, `chat_read_state`).
+  2. كتابة واختبار سياسات RLS الموحدة بالاستعانة بـ JWT claims.
+  3. تنفيذ الـ RPCs الرئيسية (`create_course_post`, `add_comment`, `mark_channel_read`).
+- **المخرج القابل للاختبار:** مجموعة اختبارات تكاملية (Integration Tests) تمر عبر PostgREST وRPCs.
+
+### المرحلة 2: واجهات العميل والتزامن المباشر — 6 أيام
+- **المهام:**
+  1. بناء شاشات القناة والمنشورات والتعليقات في تطبيق العميل (Flutter).
+  2. دمج Realtime Listener للتحديث الفوري للرسائل المقروءة والجديدة.
+  3. دمج رفع المرفقات مع Storage وحظر أنواع الملفات غير المصرح بها.
+- **المخرج القابل للاختبار:** تطبيق يعمل على الهواتف يتيح للمحاضر النشر وللطالب التعليق لحظياً.
+
+## 7.3 — مخطط الاعتماديات
+
+```mermaid
+graph LR
+    P0[مرحلة 0: Spike RLS & Realtime] --> P1[مرحلة 1: DB Schema & RPCs]
+    P1 --> P2[مرحلة 2: Client UI & Live Sync]
+```
+
+## 7.4 — تعريف "الانتهاء" (Definition of Done)
+- [x] تمرير كافة اختبارات الأمان والـ RLS بنسبة 100% بدون أي تداخل بيانات.
+- [x] تغطية الاختبارات للتكامل والـ RPCs بنسبة ≥ 85%.
+- [x] تحديث توثيق الـ API والـ OpenAPI RPC signatures.
+- [x] ضبط تنبيهات المراقبة والملاحظة (Observability).
+
 ---
 
 ## الخلاصة التنفيذية
 
-نظام الدردشة في Academic Hub يجب أن يكون نظاماً نموذجياً ومقيداً: قناة مادة واحدة، منشورات رسمية من المحاضر، تعليقات من الفئات المصرح لها، وقناة دعم فني مؤسسية. يحقق هذا التصميم التوافق المباشر مع MVP ويضمن أن تكون البيانات محمية بالوصول العملي والرمزي مع عزل مؤسسي صارم.
+نظام الدردشة في Academic Hub هو نظام موحّد ومقيد: قناة مادة واحدة، منشورات رسمية من المحاضر، تعليقات من الفئات المصرح لها، وقنوات دعم وتنظيم مؤسسية. تم تحديث الوثيقة بالكامل لتتطابق 100% مع Core Data Layer v2.1 وMVP v3.6 وقالب الـ TDD المعياري.
